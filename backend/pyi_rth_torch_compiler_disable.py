@@ -71,7 +71,8 @@ def _diag(msg: str) -> None:
         pass
 
 
-_diag(f"=== runtime hook load @ pid={os.getpid()} ===")
+_HOOK_VERSION = "v6-masking-utils-finder"
+_diag(f"=== runtime hook load @ pid={os.getpid()} version={_HOOK_VERSION} ===")
 
 
 class _NoopDecorator:
@@ -235,6 +236,111 @@ def _patch_scipy_distn_source(source: str) -> str:
     return source
 
 
+def _patch_masking_utils_source(source: str) -> str:
+    """Force torch<2.6 code path in transformers.masking_utils.
+
+    The torch>=2.6 path uses `with TransformGetItemToIndex():` to allow
+    `.item()` calls inside vmap. That context manager is implemented via
+    torch._dynamo graph transforms, which our stub doesn't reproduce — it's
+    a no-op. The inner `_vmap_for_bhqkv` then crashes with:
+
+        RuntimeError: vmap: It looks like you're calling .item() on a Tensor.
+
+    Forcing the torch<2.6 flag off selects sdpa_mask_older_torch which uses
+    a different vmap pattern that does not hit .item() and does not need
+    TransformGetItemToIndex.
+    """
+    target = 'is_torch_greater_or_equal("2.6", accept_dev=True)'
+    # Find the specific line that assigns _is_torch_greater_or_equal_than_2_6
+    if "_is_torch_greater_or_equal_than_2_6 = " + target in source:
+        return source.replace(
+            "_is_torch_greater_or_equal_than_2_6 = " + target,
+            "_is_torch_greater_or_equal_than_2_6 = False",
+            1,
+        )
+    return source
+
+
+class _SourcePatchingFinder:
+    """Generic delegate-and-wrap meta-path finder that patches a module's
+    source before exec'ing.
+
+    Subclasses declare `target` (module fullname) and `patch` (str->str).
+    Requires the target module's .py source to be bundled (use a PyInstaller
+    hook setting module_collection_mode = "pyz+py").
+    """
+
+    target: str
+    patch_fn: callable = None
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != self.target:
+            return None
+        for finder in sys.meta_path:
+            if finder is self:
+                continue
+            find = getattr(finder, "find_spec", None)
+            if find is None:
+                continue
+            try:
+                real_spec = find(fullname, path, target)
+            except Exception:
+                continue
+            if real_spec is None or real_spec.loader is None:
+                continue
+            real_spec.loader = _SourcePatchLoader(real_spec.loader, self.patch_fn)
+            return real_spec
+        return None
+
+
+class _SourcePatchLoader:
+    """Delegate loader that reads source via get_source, applies a patch, and
+    compile/exec's the patched text into module.__dict__.
+    """
+
+    def __init__(self, inner, patch_fn):
+        self._inner = inner
+        self._patch_fn = patch_fn
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def create_module(self, spec):
+        return self._inner.create_module(spec)
+
+    def exec_module(self, module):
+        source = None
+        try:
+            source = self._inner.get_source(module.__name__)
+        except Exception as e:
+            _diag(f"[source-patch] get_source({module.__name__}) failed: {e!r}")
+
+        if not source:
+            _diag(
+                f"[source-patch] no source for {module.__name__}; "
+                "falling back to inner exec_module (patch NOT applied)"
+            )
+            self._inner.exec_module(module)
+            return
+
+        patched = self._patch_fn(source)
+        _diag(
+            f"[source-patch] {module.__name__}: "
+            f"patched={patched is not source}, len={len(patched)}"
+        )
+        spec = module.__spec__
+        if spec is not None and spec.submodule_search_locations is not None:
+            module.__path__ = spec.submodule_search_locations
+        filename = getattr(self._inner, "path", module.__name__)
+        exec(compile(patched, filename, "exec"), module.__dict__)
+        _diag(f"[source-patch] {module.__name__} OK")
+
+
+class _MaskingUtilsFinder(_SourcePatchingFinder):
+    target = "transformers.masking_utils"
+    patch_fn = staticmethod(_patch_masking_utils_source)
+
+
 class _ScipyDistnPatchingFinder:
     """Delegate-and-wrap finder for scipy.stats._distn_infrastructure.
 
@@ -389,11 +495,19 @@ def _install_dynamo_stub() -> None:
     #    paths reach sklearn -> scipy.stats which trips a separate crash)
     #  - scipy.stats._distn_infrastructure -> real load with `obj` pre-bound,
     #    so librosa -> scipy.signal -> scipy.stats loads cleanly
-    sys.meta_path.insert(0, _DynamoMetaPathFinder())
-    sys.meta_path.insert(0, _TransformersStubFinder())
-    sys.meta_path.insert(0, _ScipyDistnPatchingFinder())
+    for _FinderCls in (
+        _DynamoMetaPathFinder,
+        _TransformersStubFinder,
+        _ScipyDistnPatchingFinder,
+        _MaskingUtilsFinder,
+    ):
+        try:
+            sys.meta_path.insert(0, _FinderCls())
+            _diag(f"installed finder: {_FinderCls.__name__}")
+        except Exception as e:
+            _diag(f"FAILED to install {_FinderCls.__name__}: {e!r}")
     _diag(
-        "finders installed. sys.meta_path head: "
+        "final sys.meta_path head: "
         + ", ".join(type(f).__name__ for f in sys.meta_path[:6])
     )
 
@@ -407,10 +521,10 @@ def _install_dynamo_stub() -> None:
 
 try:
     _install_dynamo_stub()
-except Exception:
+except Exception as _e:
     # Best effort. If this fails the original NameError will surface when
     # transformers imports — no worse than not patching at all.
-    pass
+    _diag(f"_install_dynamo_stub FAILED: {_e!r}")
 
 # NOTE: we deliberately do NOT import torch or torch.compiler here.
 # Runtime hooks run before the app starts and before pyi_rth_numpy_compat

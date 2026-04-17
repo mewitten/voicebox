@@ -18,6 +18,8 @@ hiddenimports += collect_submodules('jaraco')
 hiddenimports += collect_submodules('tada')
 hiddenimports += collect_submodules('mlx')
 hiddenimports += collect_submodules('mlx_audio')
+tmp_ret = collect_all('spacy_pkuseg')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('zipvoice')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('linacodec')
