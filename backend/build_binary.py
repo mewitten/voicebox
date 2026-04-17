@@ -59,6 +59,16 @@ def build_server(cuda=False):
         [
             "--runtime-hook",
             str(backend_dir / "pyi_rth_numpy_compat.py"),
+            # Stub torch.compiler.disable before transformers imports
+            # flex_attention, which otherwise triggers torch._dynamo →
+            # torch._numpy._ufuncs and crashes at module load under
+            # PyInstaller. See pyi_rth_torch_compiler_disable.py.
+            "--runtime-hook",
+            str(backend_dir / "pyi_rth_torch_compiler_disable.py"),
+            # Per-module collection overrides (e.g. forcing scipy.stats._distn_infrastructure
+            # to bundle .py source alongside .pyc so the runtime hook can source-patch it).
+            "--additional-hooks-dir",
+            str(backend_dir / "pyi_hooks"),
         ]
     )
 

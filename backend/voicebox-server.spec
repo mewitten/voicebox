@@ -1,5 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
@@ -57,9 +56,9 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=['/Users/jamie/Projects/spacedriveapp/voicebox/backend/pyi_hooks'],
     hooksconfig={},
-    runtime_hooks=[os.path.join(SPECPATH, 'pyi_rth_numpy_compat.py')],
+    runtime_hooks=['/Users/jamie/Projects/spacedriveapp/voicebox/backend/pyi_rth_numpy_compat.py', '/Users/jamie/Projects/spacedriveapp/voicebox/backend/pyi_rth_torch_compiler_disable.py'],
     excludes=['nvidia', 'nvidia.cublas', 'nvidia.cuda_cupti', 'nvidia.cuda_nvrtc', 'nvidia.cuda_runtime', 'nvidia.cudnn', 'nvidia.cufft', 'nvidia.curand', 'nvidia.cusolver', 'nvidia.cusparse', 'nvidia.nccl', 'nvidia.nvjitlink', 'nvidia.nvtx'],
     noarchive=False,
     optimize=0,
